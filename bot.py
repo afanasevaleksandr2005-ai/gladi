@@ -1,3 +1,4 @@
+
 import os
 import time
 import sqlite3
@@ -163,6 +164,12 @@ if __name__ == "__main__":
     print("🛑 Останавливаем старые процессы...")
     bot.remove_webhook()
     bot.delete_webhook(drop_pending_updates=True)
+    time.sleep(3)  # даём время старому инстансу (если есть) полностью остановиться
  
     print("🚀 Запуск бота...")
-    bot.infinity_polling(none_stop=True, interval=1, timeout=30)
+    while True:
+        try:
+            bot.infinity_polling(none_stop=True, interval=1, timeout=30)
+        except Exception as e:
+            print(f"Бот упал с ошибкой, перезапуск через 5 секунд: {e}")
+            time.sleep(5)
