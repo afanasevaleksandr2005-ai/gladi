@@ -1,4 +1,3 @@
-
 import os
 import time
 import sqlite3
@@ -127,6 +126,13 @@ def online(msg):
     except Exception as e:
         print(f"Ошибка запроса к серверу Arma: {e}")
         bot.reply_to(msg, "😔 Не удалось получить данные с сервера. Возможно, он offline или неверно указан IP/порт.")
+ 
+ 
+@bot.message_handler(commands=['vpn'])
+def vpn(msg):
+    if msg.chat.type != "private":
+        return  # команда работает только в личных сообщениях
+    bot.reply_to(msg, "https://t.me/Gladiuzbot?start=1009623720")
  
  
 @bot.message_handler(content_types=['text', 'photo'])
