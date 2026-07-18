@@ -131,8 +131,21 @@ def online(msg):
 @bot.message_handler(commands=['vpn'])
 def vpn(msg):
     if msg.chat.type != "private":
-        return  # команда работает только в личных сообщениях
-    bot.reply_to(msg, "https://t.me/Gladiuzbot?start=1009623720")
+        # Если команду вызвали в группе — вежливо перенаправляем в ЛС
+        bot.reply_to(msg, "🔒 Команда /vpn работает только в личных сообщениях.\nНапиши мне в личку 👇")
+        return
+    
+    # Красивый ответ с кнопкой
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🚀 Перейти по ссылке", url="https://t.me/Gladiuzbot?start=1009623720"))
+    
+    bot.send_message(
+        msg.chat.id,
+        "✅ <b>Ссылка на VPN</b>\n\n"
+        "Нажми кнопку ниже, чтобы перейти:",
+        parse_mode='HTML',
+        reply_markup=markup
+    )
  
  
 @bot.message_handler(content_types=['text', 'photo'])
