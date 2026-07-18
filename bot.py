@@ -1,121 +1,168 @@
 import os
-import re
+import time
 import sqlite3
 from collections import defaultdict
 from datetime import datetime
 from dotenv import load_dotenv
 import telebot
-from mistralai import Mistral
-
+import a2s
+ 
 load_dotenv()
-
+ 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-
-if not TOKEN or not MISTRAL_API_KEY:
-    raise ValueError("Проверь .env — TOKEN и MISTRAL_API_KEY обязательны!")
-
+ 
+if not TOKEN:
+    raise ValueError("Проверь .env — TOKEN обязателен!")
+ 
+# ====================== НАСТРОЙКИ ARMA 3 СЕРВЕРА ======================
+# Query-порт обычно = игровой порт + 1 (например, игровой 2302 -> query 2303)
+ARMA_SERVER_IP = os.getenv("ARMA_SERVER_IP", "")
+ARMA_SERVER_QUERY_PORT = int(os.getenv("ARMA_SERVER_QUERY_PORT", "2303"))
+ 
 bot = telebot.TeleBot(TOKEN)
-
+ 
 print(f"🤖 Бот запущен как: @{bot.get_me().username}")
-
-client = Mistral(api_key=MISTRAL_API_KEY)
-CURRENT_MODEL = "mistral-large-latest"
-
-history = defaultdict(list)
-
-# ====================== БД ======================
+ 
+# ====================== НАСТРОЙКИ АНТИСПАМА ======================
+REPEAT_THRESHOLD = 3          # сколько одинаковых сообщений подряд считать спамом
+REPEAT_WINDOW_SECONDS = 60    # за какой период времени считаем повторы
+MUTE_DURATION_SECONDS = 3600  # на сколько глушить нарушителя (1 час)
+ 
+# user_id -> chat_id -> list of (normalized_text, timestamp)
+user_messages = defaultdict(lambda: defaultdict(list))
+ 
+# ====================== БД (лог истории, без ИИ) ======================
 conn = sqlite3.connect('bot_data.db', check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('''CREATE TABLE IF NOT EXISTS chat_history (
                     id INTEGER PRIMARY KEY,
                     user_id INTEGER,
-                    role TEXT,
+                    chat_id INTEGER,
                     content TEXT,
                     timestamp TEXT)''')
 conn.commit()
-
-ADMINS = [1009623720, 6296059302, 1001908351016]
-
-def save_history(user_id, role, content):
-    history[user_id].append({"role": role, "content": content})
-    if len(history[user_id]) > 20:
-        history[user_id] = history[user_id][-20:]
-    cursor.execute("INSERT INTO chat_history (user_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                   (user_id, role, content[:500], datetime.now().isoformat()))
+ 
+ 
+def save_history(user_id, chat_id, content):
+    cursor.execute(
+        "INSERT INTO chat_history (user_id, chat_id, content, timestamp) VALUES (?, ?, ?, ?)",
+        (user_id, chat_id, content[:500], datetime.now().isoformat())
+    )
     conn.commit()
-
-def get_response(text: str, user_id: int, photo_url=None):
-    messages = [{"role": "system", "content": "Ты — дружелюбный и полезный ИИ-помощник. Отвечай на русском."}]
-    messages += history[user_id]
-
-    if photo_url:
-        content = [
-            {"type": "text", "text": text or "Опиши это изображение"},
-            {"type": "image_url", "image_url": photo_url}
-        ]
-    else:
-        content = text
-
-    messages.append({"role": "user", "content": content})
-
+ 
+ 
+def normalize_text(text: str) -> str:
+    return " ".join(text.strip().lower().split())
+ 
+ 
+def is_admin(chat_id, user_id) -> bool:
     try:
-        resp = client.chat.complete(
-            model=CURRENT_MODEL,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=1200
-        )
-        answer = resp.choices[0].message.content.strip()
-        save_history(user_id, "assistant", answer)
-        return answer
+        member = bot.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
     except Exception as e:
-        print(f"Ошибка Mistral: {e}")
-        return "😔 Ошибка соединения с Mistral. Попробуй позже."
-
+        print(f"Ошибка проверки прав: {e}")
+        return False
+ 
+ 
+def is_spam(user_id, chat_id, text) -> bool:
+    now = time.time()
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+ 
+    records = user_messages[user_id][chat_id]
+    # оставляем только записи в пределах окна
+    records[:] = [r for r in records if now - r[1] <= REPEAT_WINDOW_SECONDS]
+    records.append((normalized, now))
+ 
+    same_count = sum(1 for r in records if r[0] == normalized)
+    return same_count >= REPEAT_THRESHOLD
+ 
+ 
+def mute_user(chat_id, user_id):
+    until = int(time.time() + MUTE_DURATION_SECONDS)
+    try:
+        bot.restrict_chat_member(
+            chat_id,
+            user_id,
+            until_date=until,
+            can_send_messages=False,
+            can_send_media_messages=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+        )
+        return True
+    except Exception as e:
+        print(f"Ошибка мута пользователя: {e}")
+        return False
+ 
+ 
+def get_arma_server_info():
+    address = (ARMA_SERVER_IP, ARMA_SERVER_QUERY_PORT)
+    info = a2s.info(address, timeout=5)
+    return info
+ 
+ 
 # ====================== ХЕНДЛЕРЫ ======================
 @bot.message_handler(commands=['start'])
 def start(msg):
-    bot.reply_to(msg, "Привет! Я бот на Mistral AI.\n/model large | small — смена модели")
-
-@bot.message_handler(commands=['model'])
-def change_model(msg):
-    global CURRENT_MODEL
-    if msg.from_user.id not in ADMINS:
+    bot.reply_to(msg, "Привет! Я бот-модератор чата.")
+ 
+ 
+@bot.message_handler(commands=['online'])
+def online(msg):
+    if not ARMA_SERVER_IP:
+        bot.reply_to(msg, "⚠️ IP сервера не настроен (ARMA_SERVER_IP в .env).")
         return
-    if "small" in msg.text.lower():
-        CURRENT_MODEL = "mistral-small-latest"
-    else:
-        CURRENT_MODEL = "mistral-large-latest"
-    bot.reply_to(msg, f"Модель изменена: {CURRENT_MODEL}")
-
-@bot.message_handler(commands=['clear'])
-def clear(msg):
-    history[msg.from_user.id].clear()
-    bot.reply_to(msg, "История очищена ✅")
-
+ 
+    try:
+        info = get_arma_server_info()
+        text = (
+            f"🎮 {info.server_name}\n"
+            f"🗺 Карта: {info.map_name}\n"
+            f"👥 Онлайн: {info.player_count}/{info.max_players}"
+        )
+        bot.reply_to(msg, text)
+    except Exception as e:
+        print(f"Ошибка запроса к серверу Arma: {e}")
+        bot.reply_to(msg, "😔 Не удалось получить данные с сервера. Возможно, он offline или неверно указан IP/порт.")
+ 
+ 
 @bot.message_handler(content_types=['text', 'photo'])
 def all_messages(msg):
     user_id = msg.from_user.id
+    chat_id = msg.chat.id
     text = msg.text or msg.caption or ""
-
-    # Сохраняем запрос
-    save_history(user_id, "user", text)
-
-    photo_url = None
-    if msg.photo:
-        file_info = bot.get_file(msg.photo[-1].file_id)
-        photo_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
-
-    answer = get_response(text, user_id, photo_url)
-    bot.reply_to(msg, answer)
-
-
-# ====================== ЗАПУСК (самое важное) ======================
+ 
+    save_history(user_id, chat_id, text)
+ 
+    # В группах/супергруппах проверяем на спам, в личке — нет
+    if msg.chat.type in ("group", "supergroup"):
+        if is_admin(chat_id, user_id):
+            return  # админов не проверяем
+ 
+        if is_spam(user_id, chat_id, text):
+            try:
+                bot.delete_message(chat_id, msg.message_id)
+            except Exception as e:
+                print(f"Ошибка удаления сообщения: {e}")
+ 
+            muted = mute_user(chat_id, user_id)
+            if muted:
+                minutes = MUTE_DURATION_SECONDS // 60
+                bot.send_message(
+                    chat_id,
+                    f"🚫 {msg.from_user.first_name} заглушен на {minutes} мин. за спам/рекламу."
+                )
+            # очищаем историю сообщений пользователя, чтобы не мутить повторно
+            user_messages[user_id][chat_id].clear()
+ 
+ 
+# ====================== ЗАПУСК ======================
 if __name__ == "__main__":
     print("🛑 Останавливаем старые процессы...")
     bot.remove_webhook()
     bot.delete_webhook(drop_pending_updates=True)
-    
+ 
     print("🚀 Запуск бота...")
     bot.infinity_polling(none_stop=True, interval=1, timeout=30)
