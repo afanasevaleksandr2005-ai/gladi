@@ -1,37 +1,42 @@
 import os
 import time
 import sqlite3
+import threading
 from collections import defaultdict
 from datetime import datetime
 from dotenv import load_dotenv
 import telebot
+from telebot import types
 import a2s
- 
+
 load_dotenv()
- 
+
 TOKEN = os.getenv("TELEGRAM_TOKEN")
- 
 if not TOKEN:
     raise ValueError("Проверь .env — TOKEN обязателен!")
- 
-# ====================== НАСТРОЙКИ ARMA 3 СЕРВЕРА ======================
-# Query-порт обычно = игровой порт + 1 (например, игровой 2302 -> query 2303)
-ARMA_SERVER_IP = os.getenv("ARMA_SERVER_IP", "")
-ARMA_SERVER_QUERY_PORT = int(os.getenv("ARMA_SERVER_QUERY_PORT", "2303"))
- 
+
+# ====================== НАСТРОЙКИ ======================
+ARMA_SERVER_IP = os.getenv("ARMA_SERVER_IP", "46.174.48.58")      # Gladius
+ARMA_SERVER_QUERY_PORT = int(os.getenv("ARMA_SERVER_QUERY_PORT", "2503"))
+
+# VPN
+VPN_LINK = "https://t.me/Strelka_vpn_bot?start=1009623720"
+VPN_MESSAGE = "🔑 <b>Нужен VPN для комфортной игры?</b>\n\nПереходи по ссылке ниже 👇"
+
+AUTO_VPN_INTERVAL = 7200  # 2 часа
+
 bot = telebot.TeleBot(TOKEN)
- 
+
 print(f"🤖 Бот запущен как: @{bot.get_me().username}")
- 
-# ====================== НАСТРОЙКИ АНТИСПАМА ======================
-REPEAT_THRESHOLD = 3          # сколько одинаковых сообщений подряд считать спамом
-REPEAT_WINDOW_SECONDS = 60    # за какой период времени считаем повторы
-MUTE_DURATION_SECONDS = 3600  # на сколько глушить нарушителя (1 час)
- 
-# user_id -> chat_id -> list of (normalized_text, timestamp)
+
+# ====================== АНТИСПАМ ======================
+REPEAT_THRESHOLD = 3
+REPEAT_WINDOW_SECONDS = 60
+MUTE_DURATION_SECONDS = 3600
+
 user_messages = defaultdict(lambda: defaultdict(list))
- 
-# ====================== БД (лог истории, без ИИ) ======================
+
+# ====================== БД ======================
 conn = sqlite3.connect('bot_data.db', check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('''CREATE TABLE IF NOT EXISTS chat_history (
@@ -41,154 +46,157 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS chat_history (
                     content TEXT,
                     timestamp TEXT)''')
 conn.commit()
- 
- 
+
 def save_history(user_id, chat_id, content):
     cursor.execute(
         "INSERT INTO chat_history (user_id, chat_id, content, timestamp) VALUES (?, ?, ?, ?)",
         (user_id, chat_id, content[:500], datetime.now().isoformat())
     )
     conn.commit()
- 
- 
+
 def normalize_text(text: str) -> str:
     return " ".join(text.strip().lower().split())
- 
- 
+
 def is_admin(chat_id, user_id) -> bool:
     try:
         member = bot.get_chat_member(chat_id, user_id)
         return member.status in ("administrator", "creator")
-    except Exception as e:
-        print(f"Ошибка проверки прав: {e}")
+    except:
         return False
- 
- 
+
 def is_spam(user_id, chat_id, text) -> bool:
     now = time.time()
     normalized = normalize_text(text)
     if not normalized:
         return False
- 
+
     records = user_messages[user_id][chat_id]
-    # оставляем только записи в пределах окна
     records[:] = [r for r in records if now - r[1] <= REPEAT_WINDOW_SECONDS]
     records.append((normalized, now))
- 
+
     same_count = sum(1 for r in records if r[0] == normalized)
     return same_count >= REPEAT_THRESHOLD
- 
- 
-def mute_user(chat_id, user_id):
+
+def mute_user(chat_id, user_id, first_name):
     until = int(time.time() + MUTE_DURATION_SECONDS)
     try:
         bot.restrict_chat_member(
-            chat_id,
-            user_id,
-            until_date=until,
+            chat_id, user_id, until_date=until,
             can_send_messages=False,
             can_send_media_messages=False,
             can_send_other_messages=False,
-            can_add_web_page_previews=False,
+            can_add_web_page_previews=False
         )
+        minutes = MUTE_DURATION_SECONDS // 60
+        bot.send_message(chat_id, f"🚫 {first_name} заглушен на {minutes} мин. за спам.")
         return True
     except Exception as e:
-        print(f"Ошибка мута пользователя: {e}")
+        print(f"Ошибка мута: {e}")
         return False
- 
- 
+
 def get_arma_server_info():
-    address = (ARMA_SERVER_IP, ARMA_SERVER_QUERY_PORT)
-    info = a2s.info(address, timeout=5)
-    return info
- 
- 
+    try:
+        address = (ARMA_SERVER_IP, ARMA_SERVER_QUERY_PORT)
+        info = a2s.info(address, timeout=5)
+        return info
+    except:
+        return None
+
 # ====================== ХЕНДЛЕРЫ ======================
 @bot.message_handler(commands=['start'])
 def start(msg):
     bot.reply_to(msg, "Привет! Я бот-модератор чата.")
- 
- 
+
 @bot.message_handler(commands=['online'])
 def online(msg):
-    if not ARMA_SERVER_IP:
-        bot.reply_to(msg, "⚠️ IP сервера не настроен (ARMA_SERVER_IP в .env).")
-        return
- 
     try:
         info = get_arma_server_info()
-        text = (
-            f"🎮 {info.server_name}\n"
-            f"🗺 Карта: {info.map_name}\n"
-            f"👥 Онлайн: {info.player_count}/{info.max_players}"
-        )
-        bot.reply_to(msg, text)
+        if info:
+            text = (
+                f"🎮 <b>{info.server_name}</b>\n"
+                f"🗺 Карта: <code>{info.map_name}</code>\n"
+                f"👥 Онлайн: <b>{info.player_count}/{info.max_players}</b>"
+            )
+            bot.send_message(msg.chat.id, text, parse_mode='HTML')
+        else:
+            bot.reply_to(msg, "😔 Не удалось получить данные с сервера.")
     except Exception as e:
-        print(f"Ошибка запроса к серверу Arma: {e}")
-        bot.reply_to(msg, "😔 Не удалось получить данные с сервера. Возможно, он offline или неверно указан IP/порт.")
- 
- 
+        print(f"Arma error: {e}")
+        bot.reply_to(msg, "😔 Не удалось получить данные с сервера.")
+
 @bot.message_handler(commands=['vpn'])
 def vpn(msg):
-    if msg.chat.type != "private":
-        # Если команду вызвали в группе — вежливо перенаправляем в ЛС
-        bot.reply_to(msg, "🔒 Команда /vpn работает только в личных сообщениях.\nНапиши мне в личку 👇")
-        return
-    
-    # Красивый ответ с кнопкой
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("🚀 Перейти по ссылке", url="https://t.me/Gladiuzbot?start=1009623720"))
+    markup.add(types.InlineKeyboardButton("🚀 Получить VPN", url=VPN_LINK))
     
     bot.send_message(
         msg.chat.id,
-        "✅ <b>Ссылка на VPN</b>\n\n"
-        "Нажми кнопку ниже, чтобы перейти:",
+        VPN_MESSAGE,
         parse_mode='HTML',
-        reply_markup=markup
+        reply_markup=markup,
+        disable_web_page_preview=True
     )
- 
- 
-@bot.message_handler(content_types=['text', 'photo'])
+
+@bot.message_handler(commands=['id'])
+def get_chat_id(msg):
+    chat_id = msg.chat.id
+    print(f"📌 Chat ID: {chat_id}")
+    bot.reply_to(msg, f"🆔 ID этого чата:\n`{chat_id}`", parse_mode='Markdown')
+
+@bot.message_handler(content_types=['text', 'photo', 'video', 'document'])
 def all_messages(msg):
     user_id = msg.from_user.id
     chat_id = msg.chat.id
-    text = msg.text or msg.caption or ""
- 
+    text = msg.text or msg.caption or "[media]"
+
     save_history(user_id, chat_id, text)
- 
-    # В группах/супергруппах проверяем на спам, в личке — нет
+
     if msg.chat.type in ("group", "supergroup"):
         if is_admin(chat_id, user_id):
-            return  # админов не проверяем
- 
+            return
         if is_spam(user_id, chat_id, text):
             try:
                 bot.delete_message(chat_id, msg.message_id)
-            except Exception as e:
-                print(f"Ошибка удаления сообщения: {e}")
- 
-            muted = mute_user(chat_id, user_id)
-            if muted:
-                minutes = MUTE_DURATION_SECONDS // 60
-                bot.send_message(
-                    chat_id,
-                    f"🚫 {msg.from_user.first_name} заглушен на {minutes} мин. за спам/рекламу."
-                )
-            # очищаем историю сообщений пользователя, чтобы не мутить повторно
-            user_messages[user_id][chat_id].clear()
- 
- 
+            except:
+                pass
+            mute_user(chat_id, user_id, msg.from_user.first_name)
+
+# ====================== АВТООТПРАВКА VPN ======================
+def auto_send_vpn():
+    while True:
+        try:
+            # ←←← ПОМЕНЯЙ НА СВОЙ CHAT ID ПОСЛЕ КОМАНДЫ /id
+            GROUP_CHAT_ID = -1000000000000  
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("🚀 Получить VPN", url=VPN_LINK))
+            
+            bot.send_message(
+                GROUP_CHAT_ID,
+                VPN_MESSAGE,
+                parse_mode='HTML',
+                reply_markup=markup,
+                disable_web_page_preview=True
+            )
+            print(f"[{datetime.now().strftime('%H:%M')}] Авто-VPN отправлен")
+        except Exception as e:
+            print(f"Ошибка авто-VPN: {e}")
+        
+        time.sleep(AUTO_VPN_INTERVAL)
+
 # ====================== ЗАПУСК ======================
 if __name__ == "__main__":
-    print("🛑 Останавливаем старые процессы...")
     bot.remove_webhook()
     bot.delete_webhook(drop_pending_updates=True)
-    time.sleep(3)  # даём время старому инстансу (если есть) полностью остановиться
- 
-    print("🚀 Запуск бота...")
+    time.sleep(2)
+
+    # Запуск автоотправки в фоне
+    threading.Thread(target=auto_send_vpn, daemon=True).start()
+
+    print("🚀 Бот запущен...")
     while True:
         try:
             bot.infinity_polling(none_stop=True, interval=1, timeout=30)
         except Exception as e:
-            print(f"Бот упал с ошибкой, перезапуск через 5 секунд: {e}")
+            print(f"Бот упал: {e}. Перезапуск...")
             time.sleep(5)
