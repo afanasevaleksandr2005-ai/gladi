@@ -165,8 +165,7 @@ def all_messages(msg):
 def auto_send_vpn():
     while True:
         try:
-            # ←←← ПОМЕНЯЙ НА СВОЙ CHAT ID ПОСЛЕ КОМАНДЫ /id
-            GROUP_CHAT_ID = -1000000000000  
+            GROUP_CHAT_ID = -1001908351016   # GladiusGORN
             
             markup = types.InlineKeyboardMarkup()
             markup.add(types.InlineKeyboardButton("🚀 Получить VPN", url=VPN_LINK))
@@ -178,9 +177,9 @@ def auto_send_vpn():
                 reply_markup=markup,
                 disable_web_page_preview=True
             )
-            print(f"[{datetime.now().strftime('%H:%M')}] Авто-VPN отправлен")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Авто-VPN отправлен в группу")
         except Exception as e:
-            print(f"Ошибка авто-VPN: {e}")
+            print(f"❌ Ошибка авто-VPN: {e}")
         
         time.sleep(AUTO_VPN_INTERVAL)
 
